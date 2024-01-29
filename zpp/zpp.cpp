@@ -44,7 +44,7 @@ struct cl {
            });
     }
 
-    // let only source file doesn't starts with - (flag prefix)
+    // let only source file doesn't start with - (flag prefix)
     bool has_source() const noexcept {
         return std::ranges::any_of(argv_,
            [](const std::string& s) -> bool {
@@ -63,10 +63,10 @@ struct cl {
             argv_.erase(argv_.begin());
         }
         // language version parsing
-        if (auto r = std::ranges::find_if(argv_,
+        if (const auto r = std::ranges::find_if(argv_,
             [](const auto& s) { return s.starts_with("-std="); }); r != argv_.end()) {
             // has version flag
-            auto ver = r->substr(strlen("-std="));
+            const auto ver = r->substr(strlen("-std="));
             std::cout << ver << '\n';
 
             if(ver == "Zpp24")
@@ -91,12 +91,13 @@ enum class Token {
     Separator
 };
 
-auto tokenize_file(std::filesystem::path file_path) noexcept ->
+auto tokenize_file(const std::filesystem::path& file_path) noexcept ->
 std::expected<std::vector<Token>, std::exception> {
     std::ifstream ifs(file_path, std::ios::in);
     std::string s;
     
-    if (!ifs.is_open()) return std::unexpected<std::exception>(("Failed to open file, " + file_path.string() + '\n').c_str());
+    if (!ifs.is_open())
+        return std::unexpected<std::exception>(("Failed to open file, " + file_path.string() + '\n').c_str());
     while (std::getline(ifs, s)) {
         std::cout << s << '\n';
     }
@@ -106,21 +107,21 @@ std::expected<std::vector<Token>, std::exception> {
 namespace init {
 
 // not meaning the function does compile
-void compile_zpp(init::compile_env env) noexcept {
+void compile_zpp(const init::compile_env& env) noexcept {
     auto toks = tok::tokenize_file(env.source_path_);
 }
 
-void run_build_conf(std::filesystem::path build_conf, init::compile_env env) noexcept {
+void run_build_conf(const std::filesystem::path& build_conf, const init::compile_env& env) noexcept {
     // TODO: someday.
 }
 } // ns init
 
-void parse_zpp(init::compile_env env) noexcept {
+void parse_zpp(const init::compile_env& env) noexcept {
     if (!std::filesystem::is_directory(env.source_path_)) {
         init::compile_zpp(env);
         return;
     }
-    auto build_zpp = env.source_path_ / "build.zpp";
+    const auto build_zpp = env.source_path_ / "build.zpp";
 
     if (!std::filesystem::is_regular_file(build_zpp)) {
         std::cout << "Expected \'build.zpp\' at " << env.source_path_ << '\n';
