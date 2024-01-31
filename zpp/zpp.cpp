@@ -6,6 +6,7 @@
 #include <iostream>
 #include <ranges>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace zpp {
@@ -52,22 +53,23 @@ struct cl {
            });
     }
 
-    std::expected<init::compile_env, std::exception> export_compile_envs() noexcept
+    std::expected<init::compile_env, std::exception> export_compile_envs(wchar_t* zpp_pth) noexcept
     {
         init::compile_env env{};
 
-        if (argv_.begin()->starts_with('-'))
-            return std::unexpected<std::exception>("expected source directory");
+        if (!has_source()) {
+            env.source_path_ = std::filesystem::path(zpp_pth);
+            free(zpp_pth); // allocated from main
+        }
         else {
             env.source_path_ = *argv_.begin();
-            argv_.erase(argv_.begin());
+            argv_.erase(argv_.begin()); // the flag is used, so drop it
         }
         // language version parsing
         if (const auto r = std::ranges::find_if(argv_,
             [](const auto& s) { return s.starts_with("-std="); }); r != argv_.end()) {
             // has version flag
             const auto ver = r->substr(strlen("-std="));
-            std::cout << ver << '\n';
 
             if(ver == "Zpp24")
                 env.target_source_version_ = init::compile_env::ZppVersion::Zpp24;
@@ -108,29 +110,33 @@ namespace init {
 
 // not meaning the function does compile
 void compile_zpp(const init::compile_env& env) noexcept {
+    std::cout << "compile_zpp() called\n";
     auto toks = tok::tokenize_file(env.source_path_);
 }
 
-void run_build_conf(const std::filesystem::path& build_conf, const init::compile_env& env) noexcept {
+void run_build_conf(const init::compile_env& env) noexcept {
     // TODO: someday.
+    std::cout << "run_build_conf() called\n";
+
+    return;
 }
 } // ns init
 
 void parse_zpp(const init::compile_env& env) noexcept {
-    if (!std::filesystem::is_directory(env.source_path_)) {
+    using namespace std::literals;
+
+    const auto& pth = env.source_path_;
+    constexpr auto cvt_sv = [](auto&& r) -> std::string_view { return std::string_view(r.begin(), r.end()); };
+
+    if (std::ranges::starts_with(std::views::reverse(pth.string()), std::views::reverse("build.zpp"sv)))
+        init::run_build_conf(env);
+    else
         init::compile_zpp(env);
-        return;
-    }
-    const auto build_zpp = env.source_path_ / "build.zpp";
-
-    if (!std::filesystem::is_regular_file(build_zpp)) {
-        std::cout << "Expected \'build.zpp\' at " << env.source_path_ << '\n';
-        return;
-    }
-
-    init::run_build_conf(build_zpp, env);
 }
 } // ns zpp
+
+#include <Windows.h>
+#include <tchar.h> // _T
 
 int main(int c, char** v) {
 
@@ -139,7 +145,8 @@ int main(int c, char** v) {
 
     if (cmd.is_help() || c == 1) {
         std::cout <<
-            "usage: zpp [PROJECT DIR] [OPTIONS]\n"
+            "usage: zpp [SOURCE] [OPTIONS]\n"
+            "[SOURCE]       : Either run build.zpp or compile *.zpp\n"
             "[OPTIONS]\n"
             "-h             : Show zpp compiler usage\n"
             "-std={VERSION} : Set the zpp compiler version\n"
@@ -149,15 +156,39 @@ int main(int c, char** v) {
         return 0;
     }
 
+    wchar_t* data = (wchar_t*)malloc(sizeof(wchar_t) * MAX_PATH);
+
     if (!cmd.has_source()) {
         std::cout << "zpp source file is not given\n";
-        return -1;
+
+        auto hInstance = GetModuleHandle(0);
+
+        WCHAR crDir[MAX_PATH]{};
+        GetCurrentDirectory(MAX_PATH, (LPWSTR)crDir);
+
+        OPENFILENAME ofn = {
+            .lStructSize = sizeof(OPENFILENAME),
+            .hwndOwner = 0,
+            .hInstance = hInstance,
+            .lpstrFilter = _T("build.zpp or any zpp file\0build.zpp;*.zpp\0\0"),
+            .nFilterIndex = 1,
+            .lpstrFile = (LPWSTR)data,
+            .nMaxFile = (DWORD)wcslen(data),
+            .lpstrFileTitle = 0,
+            .lpstrInitialDir = crDir,
+            .Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST
+        };
+        ofn.lpstrFile[0] = '\0';
+        if (GetOpenFileName(&ofn) != TRUE) {
+            std::cerr << "Failed to open file\n";
+            return -1;
+        }
     }
 
-    auto result = cmd.export_compile_envs();
+    auto result = cmd.export_compile_envs(data);
 
     if (result.has_value()) {
-        // std::cout << result.value() << '\n';
+        std::cout << result.value() << '\n';
         zpp::parse_zpp(*result);
     }
     else {
