@@ -268,23 +268,34 @@ public:
         return *this;
     }
 
-    virtual CodeBlock gen_code() noexcept { return {}; }
+    virtual std::ostream& dump_info(std::ostream&) const noexcept = 0;
+    virtual CodeBlock gen_code() const noexcept = 0;
 };
 
 class Expr : public AST {
 public:
-    ~Expr() override {}
+    ~Expr() noexcept override = default;
     template <typename T>
     Expr& operator=(T&& rhs) noexcept {
         return std::forward<T>(*this);
     }
 
-    CodeBlock gen_code() noexcept override {
+    std::ostream& dump_info(std::ostream& os) const noexcept override {
+        return os;
+    }
+
+    CodeBlock gen_code() const noexcept override {
         return CodeBlock{};
     }
 };
 
 class Function : public AST {
+    template <typename Rng>
+    friend std::ostream& operator<<(std::ostream& os, Rng&& rng) noexcept {
+        std::ranges::for_each(rng, [&os](auto&& a) {os << a; });
+        return os;
+    }
+
 public:
     using farg_t = std::vector<std::pair<std::string, std::string>>;
 
@@ -294,9 +305,18 @@ public:
     Function(std::string&& name, std::string&& ret_ty, farg_t&& args)
         : AST{}, name_(std::move(name)), ret_ty_(std::move(ret_ty)), farg_(std::move(args))
     {}
-    ~Function() override {}
+    ~Function() noexcept override = default;
 
-    CodeBlock gen_code() noexcept override {
+    std::ostream& dump_info(std::ostream& os) const noexcept override {
+        auto tf =
+            farg_
+            | std::views::transform([](const auto& p) -> std::string { return p.second + " " + p.first; });
+        auto s = tf | std::views::common | std::views::join_with(std::string{ ", " });
+        os << name_ << "(" << s << ") -> " << ret_ty_ << '\n';
+        return os;
+    }
+
+    CodeBlock gen_code() const noexcept override {
         return CodeBlock{};
     }
 };
@@ -305,7 +325,39 @@ class Namespace : public AST {
 public:
     ~Namespace() override {}
 
-    CodeBlock gen_code() noexcept override {
+
+    std::ostream& dump_info(std::ostream& os) const noexcept override {
+        return os;
+    }
+
+    CodeBlock gen_code() const noexcept override {
+        return CodeBlock{};
+    }
+};
+
+class Expression : public AST {
+public:
+    virtual ~Expression() = default;
+
+    std::ostream& dump_info(std::ostream& os) const noexcept override {
+        return os;
+    }
+
+    CodeBlock gen_code() const noexcept override {
+        return CodeBlock{};
+    }
+};
+
+class EReturn : public Expression {
+public:
+    ;
+    ~EReturn() override = default;
+
+    std::ostream& dump_info(std::ostream& os) const noexcept override {
+        return os;
+    }
+
+    CodeBlock gen_code() const noexcept override {
         return CodeBlock{};
     }
 };
@@ -324,7 +376,7 @@ class LookUp {
     typename std::vector<E>::iterator i_;
 public:
 
-    LookUp(std::vector<E>&& v) : r_{ std::move(v) }, i_{ r_.begin() } {}
+    LookUp(std::vector<E>&& v) : r_{ std::move(v)}, i_{r_.begin()} {}
 
     bool empty() const noexcept {
         return i_ == r_.end();
@@ -346,26 +398,27 @@ auto make_codeblocks(auto&& tokens) noexcept
 
     using ve_t = std::pair<Token, std::string>;
 
-    LookUp<ve_t> lookUp{ std::move(tokens) };
+    LookUp<ve_t> lookUp{ std::forward<decltype(tokens)>(tokens) };
 
     // no auto, for language server's easy process
+    // reference value type not allowed, so alternatively using pointer type
     auto _expect = [&lookUp](Token e = Token::Unknown) noexcept
-        -> std::expected<LookUp<ve_t>, std::exception> {
+        -> std::expected<LookUp<ve_t>*/*!ref*/, std::exception> {
         ;
         if (e == Token::Unknown) {
             if (lookUp.empty())
                 return std::unexpected(std::exception{ "EOF" });
-            return lookUp;
+            return &lookUp;
         }
         if (auto l = lookUp.look(); l && l->first != e)
             return EXPECTED(e, l->first);
-        return lookUp;
+        return &lookUp;
     };
 
     auto expect = [&_expect](Token e = Token::Unknown) noexcept
         -> std::expected<ve_t, std::exception> {
         auto v = _expect(e);
-        return v.has_value() ? std::expected<ve_t, std::exception>(v->drop()) : std::unexpected(v.error());
+        return v.has_value() ? std::expected<ve_t, std::exception>(v.value()->drop()) : std::unexpected(v.error());
     };
 
     //constexpr auto expect_farg = [&](auto& buf) noexcept
@@ -479,15 +532,23 @@ auto make_codeblocks(auto&& tokens) noexcept
         if (!buf.has_value()) return std::unexpected(buf.error());
         if (buf->second != "{") return std::unexpected(std::exception{ "Expected '{'" });
 
-        buf = expect();
-        if (!buf.has_value()) return std::unexpected(buf.error());
-
         // empty function
-        if (auto l = lookUp.look(); l && l->first == Token::Bracket && l->second == "}") {
-            std::cout << "Empty function\n";
+        if (auto l = lookUp.look(); l.has_value() && l->first == Token::Bracket && l->second == "}") {
+            ;
         }
         else {
             std::cout << stringify_tok(l->first) << ": " << l->second << '\n';
+            auto v = l.value();
+            switch(v.first) {
+            case Token::Identifier:
+                if(v.second == "ret")
+                {
+                    EReturn ret;
+                }
+                break;
+            default:
+                return std::unexpected(std::exception{ ("Unexpected '" + v.second + '\'').c_str() });
+            }
         }
     }
     if(buf->first == Token::Separator) {
