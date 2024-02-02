@@ -268,7 +268,7 @@ public:
         return *this;
     }
 
-    virtual CodeBlock&& gen_code() noexcept;
+    virtual CodeBlock gen_code() noexcept { return {}; }
 };
 
 class Expr : public AST {
@@ -279,13 +279,12 @@ public:
         return std::forward<T>(*this);
     }
 
-    CodeBlock&& gen_code() noexcept override {
+    CodeBlock gen_code() noexcept override {
         return CodeBlock{};
     }
 };
 
-class Function : public AST
-{
+class Function : public AST {
 public:
     using farg_t = std::vector<std::pair<std::string, std::string>>;
 
@@ -296,12 +295,25 @@ public:
         : AST{}, name_(std::move(name)), ret_ty_(std::move(ret_ty)), farg_(std::move(args))
     {}
     ~Function() override {}
+
+    CodeBlock gen_code() noexcept override {
+        return CodeBlock{};
+    }
+};
+
+class Namespace : public AST {
+public:
+    ~Namespace() override {}
+
+    CodeBlock gen_code() noexcept override {
+        return CodeBlock{};
+    }
 };
 
 ////
 
 #define __MK_EXC(str) std::exception{(str).c_str()}
-#define EXPECTED(tk) std::unexpected(__MK_EXC("Expected " + zpp::tok::stringify_tok(tk)))
+#define EXPECTED(t1, t2) std::unexpected(__MK_EXC("Expected " + zpp::tok::stringify_tok(t1) + ", but " + zpp::tok::stringify_tok(t2)))
 
 ////
 
@@ -319,12 +331,12 @@ public:
     }
 
     std::optional<E> look() const noexcept {
-        if (i_ + 1 == r_.end()) return {};
-        return *(i_ + 1);
+        if (i_ == r_.end()) return {};
+        return *i_;
     }
 
-    E&& drop() && noexcept {
-        return std::move(*i_++);
+    E drop() noexcept {
+        return *i_++;
     }
 };
 
@@ -332,36 +344,28 @@ auto make_codeblocks(auto&& tokens) noexcept
     -> std::expected<std::vector<std::unique_ptr<AST>>, std::exception> {
     using namespace zpp::tok;
 
-    // type.
-    std::vector<std::pair<Token, std::string>> toks = std::forward<decltype(tokens)>(tokens);
+    using ve_t = std::pair<Token, std::string>;
 
-    //if (toks.empty()) return {};
-
-    //if (toks[0].first != Token::Identifier)
-    //    return EXPECTED(Token::Identifier);
+    LookUp<ve_t> lookUp{ std::move(tokens) };
 
     // no auto, for language server's easy process
-    auto _expect = []<typename A, typename B>(Token e, std::vector<std::pair<A, B>>&& ts = {}) noexcept
-        -> std::expected<std::pair<A, B>, std::exception> {
+    auto _expect = [&lookUp](Token e = Token::Unknown) noexcept
+        -> std::expected<LookUp<ve_t>, std::exception> {
         ;
-        using lu_t = LookUp<std::pair<A, B>>;
-        static lu_t lookUp;
-        if constexpr (ts) lookUp = lu_t{ std::move(ts) };
         if (e == Token::Unknown) {
             if (lookUp.empty())
                 return std::unexpected(std::exception{ "EOF" });
-            return lookUp.drop();
+            return lookUp;
         }
-        if (!lookUp.empty() || lookUp.look().first != e)
-            return EXPECTED(e);
-        return lookUp.drop();
+        if (auto l = lookUp.look(); l && l->first != e)
+            return EXPECTED(e, l->first);
+        return lookUp;
     };
 
-    auto buf = _expect(Token::Identifier, std::move(toks));
-    if(buf.)
-
-    auto expect = [&](Token e = Token::Unknown) noexcept {
-        return _expect(e);
+    auto expect = [&_expect](Token e = Token::Unknown) noexcept
+        -> std::expected<ve_t, std::exception> {
+        auto v = _expect(e);
+        return v.has_value() ? std::expected<ve_t, std::exception>(v->drop()) : std::unexpected(v.error());
     };
 
     //constexpr auto expect_farg = [&](auto& buf) noexcept
@@ -378,7 +382,7 @@ auto make_codeblocks(auto&& tokens) noexcept
     //        return std::pair{ name, type };
     //    };
 
-    auto expect_fargs = [&](auto& buf) noexcept
+    auto expect_fargs = [&expect](auto& buf) noexcept
         -> std::expected<
         std::vector<std::pair<std::string, std::string>>,
         std::exception> {
@@ -407,7 +411,7 @@ auto make_codeblocks(auto&& tokens) noexcept
         pbuf = {};
         // 3
         if (buf->first != Token::Identifier)
-            return std::unexpected(std::exception{ "Expected identifier" });
+            return EXPECTED(Token::Identifier, buf->first);
         pbuf.first = std::move(buf->second);
 
         // 4
@@ -441,8 +445,10 @@ auto make_codeblocks(auto&& tokens) noexcept
 
     auto expect_type = [&](auto& buf) noexcept
     -> std::expected<std::pair<Token, std::string>, std::exception> {
-            return expect(Token::Identifier);
-        };
+        return expect(Token::Identifier);
+    };
+
+    auto glob_ns = code::Namespace {};
 
     // namespace or class or function
     auto buf = expect(Token::Identifier);
@@ -465,7 +471,7 @@ auto make_codeblocks(auto&& tokens) noexcept
         buf = expect_type(buf);
         if (!buf.has_value()) return std::unexpected(buf.error());
 
-        Function c_func{ std::move(name), std::move(*buf), std::move(args) };
+        Function c_func{ std::move(name), std::move(buf->second), std::move(args) };
 
         // parse function body
 
@@ -475,9 +481,13 @@ auto make_codeblocks(auto&& tokens) noexcept
 
         buf = expect();
         if (!buf.has_value()) return std::unexpected(buf.error());
-        if(buf->first == Token::Bracket && buf->second == "}")
-        {
-            ;
+
+        // empty function
+        if (auto l = lookUp.look(); l && l->first == Token::Bracket && l->second == "}") {
+            std::cout << "Empty function\n";
+        }
+        else {
+            std::cout << stringify_tok(l->first) << ": " << l->second << '\n';
         }
     }
     if(buf->first == Token::Separator) {
@@ -497,13 +507,15 @@ auto make_codeblocks(auto&& tokens) noexcept
                 return std::unexpected(std::exception{ "Expected '{'" });
 
         // parse namespaces
-        std::cout << "NAMESPACE: " << name << '\n';
+        std::cout << "NAMESPACE: " << ns << '\n';
     }
 
     if(buf->first == Token::From || buf->first == Token::Bracket) {
         // parse class
         std::cout << "CLASS: " << name << '\n';
     }
+
+    return {};
 }
 
 } // ns code
@@ -514,8 +526,10 @@ int compile_zpp(const compile_env& env) noexcept {
     auto toks = tok::tokenize_file(env.source_path_);
 
     if(toks.has_value()) {
-        auto&& val = std::move(toks.value());
-        auto codes = code::make_codeblocks(std::move(val));
+        //std::cout << toks.value().begin()->second << '\n';
+        auto codes = code::make_codeblocks(std::move(toks.value()));
+        if (!codes.has_value()) std::cout << codes.error().what() << '\n';
+        return 0;
     }
     else {
         std::cerr << toks.error().what() << '\n';
