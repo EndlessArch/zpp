@@ -4,9 +4,9 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <ranges>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace zpp {
@@ -247,7 +247,7 @@ std::expected<std::vector<std::pair<Token, std::string>>, std::exception> {
 TOKENIZE_LOOP:
     if (auto [t, w] = readWord(); t != Token::Eof) {
         toks.emplace_back(t, w);
-        std::cout << w << '\n';
+        // std::cout << w << '\n';
         goto TOKENIZE_LOOP;
     }
     return toks;
@@ -256,41 +256,112 @@ TOKENIZE_LOOP:
 
 namespace code {
 
+class CodeBlock {};
 
+class AST {
+public:
+    AST() noexcept = default;
+    AST(auto&&) noexcept {}
+    virtual ~AST() noexcept = default;
+
+    AST& operator=(this auto&&, auto&&) noexcept {
+        return *this;
+    }
+
+    virtual CodeBlock&& gen_code() noexcept;
+};
+
+class Expr : public AST {
+public:
+    ~Expr() override {}
+    template <typename T>
+    Expr& operator=(T&& rhs) noexcept {
+        return std::forward<T>(*this);
+    }
+
+    CodeBlock&& gen_code() noexcept override {
+        return CodeBlock{};
+    }
+};
+
+class Function : public AST
+{
+public:
+    using farg_t = std::vector<std::pair<std::string, std::string>>;
+
+    const std::string name_;
+    const std::string ret_ty_;
+    const farg_t farg_;
+    Function(std::string&& name, std::string&& ret_ty, farg_t&& args)
+        : AST{}, name_(std::move(name)), ret_ty_(std::move(ret_ty)), farg_(std::move(args))
+    {}
+    ~Function() override {}
+};
 
 ////
 
+#define __MK_EXC(str) std::exception{(str).c_str()}
+#define EXPECTED(tk) std::unexpected(__MK_EXC("Expected " + zpp::tok::stringify_tok(tk)))
+
+////
+
+template <typename E>
+class LookUp {
+    std::vector<E> r_;
+
+    typename std::vector<E>::iterator i_;
+public:
+
+    LookUp(std::vector<E>&& v) : r_{ std::move(v) }, i_{ r_.begin() } {}
+
+    bool empty() const noexcept {
+        return i_ == r_.end();
+    }
+
+    std::optional<E> look() const noexcept {
+        if (i_ + 1 == r_.end()) return {};
+        return *(i_ + 1);
+    }
+
+    E&& drop() && noexcept {
+        return std::move(*i_++);
+    }
+};
+
 auto make_codeblocks(auto&& tokens) noexcept
-    -> std::expected<std::vector<char>, std::exception> {
+    -> std::expected<std::vector<std::unique_ptr<AST>>, std::exception> {
     using namespace zpp::tok;
 
     // type.
-    std::vector<std::pair<Token, std::string>> toks = std::move(tokens);
+    std::vector<std::pair<Token, std::string>> toks = std::forward<decltype(tokens)>(tokens);
 
-    if (toks.empty()) return {};
+    //if (toks.empty()) return {};
 
-    if (toks[0].first != Token::Identifier)
-        return std::unexpected(std::exception{ "Expected identifier" });
+    //if (toks[0].first != Token::Identifier)
+    //    return EXPECTED(Token::Identifier);
 
-    // no auto, for language server easy processing
-    auto _expect = []<typename A, typename B>(std::vector<std::pair<A, B>>&ts, Token e) noexcept
+    // no auto, for language server's easy process
+    auto _expect = []<typename A, typename B>(Token e, std::vector<std::pair<A, B>>&& ts = {}) noexcept
         -> std::expected<std::pair<A, B>, std::exception> {
-        if (e == Token::Unknown)
-        {
-            if (ts.empty())
-                return std::unexpected(std::exception{ "Unexpected EOF" });
-            auto a = std::move(ts[0]);
-            ts.erase(ts.begin());
-            return a;
+        ;
+        using lu_t = LookUp<std::pair<A, B>>;
+        static lu_t lookUp;
+        if constexpr (ts) lookUp = lu_t{ std::move(ts) };
+        if (e == Token::Unknown) {
+            if (lookUp.empty())
+                return std::unexpected(std::exception{ "EOF" });
+            return lookUp.drop();
         }
-        if (ts.empty() || ts[0].first != e)
-            return std::unexpected(std::exception{ ("Expected " + stringify_tok(e)).c_str()});
-        auto a = std::move(ts[0]);
-        ts.erase(ts.begin());
-        return a;
+        if (!lookUp.empty() || lookUp.look().first != e)
+            return EXPECTED(e);
+        return lookUp.drop();
     };
+
+    auto buf = _expect(Token::Identifier, std::move(toks));
+    if(buf.)
+
     auto expect = [&](Token e = Token::Unknown) noexcept {
-        return _expect(toks, e);
+        return _expect(e);
     };
 
     //constexpr auto expect_farg = [&](auto& buf) noexcept
@@ -328,7 +399,7 @@ auto make_codeblocks(auto&& tokens) noexcept
         if (!buf.has_value()) return std::unexpected(buf.error());
         if (buf->first == Token::Paren) { // 8
             if (buf->second == "(")
-                return std::unexpected(std::exception{ "Expected ')" });
+                return std::unexpected(std::exception{ "Expected ')'" });
             return {}; // non-argument function
         }
         // 7
@@ -360,7 +431,7 @@ auto make_codeblocks(auto&& tokens) noexcept
         else {
             if (buf->first == Token::Paren) {
                 if (buf->second == "(")
-                    return std::unexpected(std::exception{ "Expected ')" });
+                    return std::unexpected(std::exception{ "Expected ')'" });
                 return ret;
             }
             return std::unexpected(
@@ -391,8 +462,23 @@ auto make_codeblocks(auto&& tokens) noexcept
         buf = expect(Token::TypeOf);
         if (!buf.has_value()) return std::unexpected(buf.error());
 
+        buf = expect_type(buf);
+        if (!buf.has_value()) return std::unexpected(buf.error());
+
+        Function c_func{ std::move(name), std::move(*buf), std::move(args) };
+
         // parse function body
-        std::cout << "FUNCTION(" << args.size() << "): " << name << '\n';
+
+        buf = expect(Token::Bracket);
+        if (!buf.has_value()) return std::unexpected(buf.error());
+        if (buf->second != "{") return std::unexpected(std::exception{ "Expected '{'" });
+
+        buf = expect();
+        if (!buf.has_value()) return std::unexpected(buf.error());
+        if(buf->first == Token::Bracket && buf->second == "}")
+        {
+            ;
+        }
     }
     if(buf->first == Token::Separator) {
         std::string ns = std::move(name);
