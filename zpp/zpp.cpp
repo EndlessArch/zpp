@@ -308,10 +308,11 @@ public:
     ~Function() noexcept override = default;
 
     std::ostream& dump_info(std::ostream& os) const noexcept override {
-        auto tf =
+        auto s =
             farg_
-            | std::views::transform([](const auto& p) -> std::string { return p.second + " " + p.first; });
-        auto s = tf | std::views::common | std::views::join_with(std::string{ ", " });
+            | std::views::transform([](const auto& p) -> std::string { return p.second + " " + p.first; })
+            | std::views::common
+            | std::views::join_with(std::string{ ", " });
         os << name_ << "(" << s << ") -> " << ret_ty_ << '\n';
         return os;
     }
@@ -392,231 +393,268 @@ public:
     }
 };
 
-auto make_codeblocks(auto&& tokens) noexcept
-    -> std::expected<std::vector<std::unique_ptr<AST>>, std::exception> {
-    using namespace zpp::tok;
+typedef struct {
+    struct {
+        std::size_t row_;
+        std::size_t col_;
+    } pos_;
 
+    std::string err_desc_;
+} Error;
+
+class ErrorLog {
+    std::ostream& os_;
+    std::filesystem::path fpath_;
+    std::vector<Error> err_;
+public:
+    template <typename Path>
+    ErrorLog(Path&& p, std::ostream& os) noexcept : os_(os), fpath_{ std::forward<Path>(p) } {}
+
+    void add_error(Error&& e) noexcept {
+        err_.push_back(std::move(e));
+    }
+
+    template <typename Ret>
+    auto submit_and_exit(int code = 0) noexcept -> Ret
+    {
+        auto logify = [this]<typename T>(T&& _e) -> std::string
+        {
+            Error e = std::forward<T>(_e);
+            std::stringstream ss;
+            ss << fpath_.string() << '(' << e.pos_.col_ << ", " << e.pos_.row_ << "): error: "
+                << e.err_desc_;
+            return ss.str();
+        };
+        auto v =
+            err_
+            | std::views::transform(logify)
+            | std::views::join_with(std::string{ '\n' });
+        std::ranges::for_each(v, [this](auto&& s) { os_ << s; });
+        std::exit(code);
+        return *static_cast<Ret*>(nullptr);
+    }
+};
+
+auto make_codeblocks(init::compile_env&& env, auto&& tokens) noexcept
+    -> std::pair<std::vector<std::unique_ptr<AST>>, ErrorLog> {
+    using namespace zpp::tok;
     using ve_t = std::pair<Token, std::string>;
 
     LookUp<ve_t> lookUp{ std::forward<decltype(tokens)>(tokens) };
+    ErrorLog el{ env.source_path_, std::cerr };
 
-    // no auto, for language server's easy process
     // reference value type not allowed, so alternatively using pointer type
-    auto _expect = [&lookUp](Token e = Token::Unknown) noexcept
-        -> std::expected<LookUp<ve_t>*/*!ref*/, std::exception> {
+    auto _expect = [&lookUp](ErrorLog& el, Token e = Token::Unknown) noexcept
+        -> std::optional<LookUp<ve_t>*/*no-ref*/> {
         ;
         if (e == Token::Unknown) {
-            if (lookUp.empty())
-                return std::unexpected(std::exception{ "EOF" });
+            if (lookUp.empty()) {
+                el.add_error({ {}, "No more token" });
+                return {};
+            }
             return &lookUp;
         }
-        if (auto l = lookUp.look(); l && l->first != e)
-            return EXPECTED(e, l->first);
+        if (auto l = lookUp.look(); l && l->first != e) {
+            el.add_error({ {}, "Expected " + stringify_tok(e) + ", but " + stringify_tok(l->first) });
+            return {};
+        }
         return &lookUp;
     };
-
-    auto expect = [&_expect](Token e = Token::Unknown) noexcept
-        -> std::expected<ve_t, std::exception> {
-        auto v = _expect(e);
-        return v.has_value() ? std::expected<ve_t, std::exception>(v.value()->drop()) : std::unexpected(v.error());
+    auto look = [&lookUp, &el] {
+        auto l = lookUp.look();
+        return l.has_value() ? *l : el.submit_and_exit<ve_t>();
+    };
+    auto eat = [&_expect, &el](Token e = Token::Unknown) noexcept
+        -> ve_t {
+        auto v = _expect(el, e);
+        return v.has_value() ? v.value()->drop() : el.submit_and_exit<ve_t>();
     };
 
-    //constexpr auto expect_farg = [&](auto& buf) noexcept
-    //    -> std::expected<std::pair<std::string, std::string>, std::exception>
-    //    {
-    //        std::string name, type;
-    //        buf = expect();
-    //        if (!buf.has_value()) return buf.error();
-    //        name = *buf;
-
-    //        buf = expect(Token::TypeOf);
-    //        if (!buf.has_value()) return buf.error();
-    //        type = *buf;
-    //        return std::pair{ name, type };
-    //    };
-
-    auto expect_fargs = [&expect](auto& buf) noexcept
-        -> std::expected<
-        std::vector<std::pair<std::string, std::string>>,
-        std::exception> {
+    auto expect_fargs = [&eat, &el](auto& buf) noexcept
+        -> std::vector<std::pair<std::string, std::string>> {
         // func ( arg : ty , ... )
         // 1~^ 2^ 3~^ 4 5^ 6 7~^ 8
 
         std::vector<std::pair<std::string, std::string>> ret{};
         std::pair<std::string, std::string> pbuf;
 
-        //// 2
-        //buf = expect();
-        //if (!buf->has_value()) return buf->error();
-        //if (buf->first == Token::Paren)
-        //    if (buf->second == ")")
-        //        return std::unexpected(std::exception{ "Expected '('" });
+        // 2
+        buf = eat();
+        if (buf.first == Token::Paren) {
+            if (buf.second == ")") {
+                el.add_error({ {},  "Expected '('" });
+                return {};
+            }
+        }
 
-        buf = expect();
-        if (!buf.has_value()) return std::unexpected(buf.error());
-        if (buf->first == Token::Paren) { // 8
-            if (buf->second == "(")
-                return std::unexpected(std::exception{ "Expected ')'" });
+        buf = eat();
+        if (buf.first == Token::Paren) { // 8
+            if (buf.second == "(")
+                el.add_error({{}, "Expected ')'"});
             return {}; // non-argument function
         }
         // 7
-    PARSE_FARG:
+PARSE_FARG:
         pbuf = {};
         // 3
-        if (buf->first != Token::Identifier)
-            return EXPECTED(Token::Identifier, buf->first);
-        pbuf.first = std::move(buf->second);
+        if (buf.first != Token::Identifier)
+        {
+            el.add_error({ {},
+                "Expected " + stringify_tok(Token::Identifier) + ", but " + stringify_tok(buf.first) });
+            return {};
+        }
+        pbuf.first = std::move(buf.second);
 
         // 4
-        buf = expect(Token::TypeOf);
-        if (!buf.has_value()) return std::unexpected(buf.error());
+        buf = eat(Token::TypeOf);
 
         // 5
-        buf = expect(Token::Identifier);
-        if (!buf.has_value()) return std::unexpected(buf.error());
-        pbuf.second = std::move(buf->second);
+        buf = eat(Token::Identifier);
+        pbuf.second = std::move(buf.second);
         ret.push_back(std::move(pbuf));
 
         // 6
-        buf = expect();
-        if (!buf.has_value()) return std::unexpected(buf.error());
+        buf = eat();
 
-        if (buf->first == Token::Comma) {
-            buf = expect(Token::Identifier);
+        if (buf.first == Token::Comma) {
+            buf = eat(Token::Identifier);
             goto PARSE_FARG;
         }
-        else {
-            if (buf->first == Token::Paren) {
-                if (buf->second == "(")
-                    return std::unexpected(std::exception{ "Expected ')'" });
-                return ret;
+
+        if (buf.first == Token::Paren) {
+            if (buf.second == "(") {
+                el.add_error({ {}, "Expected ')'" });
+                return {};
             }
-            return std::unexpected(
-                std::exception{ ("Unexpected " + stringify_tok(buf->first) + ", expected ')'").c_str() });
+            return ret;
         }
+        el.add_error({ {}, "Unexpected " + stringify_tok(buf.first) + ", expected ')'" });
+        return {};
     };
 
-    auto expect_type = [&](auto& buf) noexcept
-    -> std::expected<std::pair<Token, std::string>, std::exception> {
-        return expect(Token::Identifier);
+    auto expect_type = [&]() noexcept
+    -> ve_t {
+        return eat(Token::Identifier);
     };
 
     auto glob_ns = code::Namespace {};
 
     // namespace or class or function
-    auto buf = expect(Token::Identifier);
-    if (!buf.has_value()) return std::unexpected(buf.error());
+    auto buf = look(); //  eat(Token::Identifier);
 
-    std::string name = buf->second;
+    while (buf.first == Token::Identifier) {
+        eat();
 
-    buf = expect();
-    if (!buf.has_value()) return std::unexpected(buf.error());
-    if(buf->first == Token::Paren) {
-        if (buf->second != "(")
-            return std::unexpected(std::exception{ "Unexpected ')'" });
-        auto ve = expect_fargs(buf);
-        if (!ve.has_value()) return std::unexpected(ve.error());
-        auto args = std::move(*ve);
+        std::string name = buf.second;
 
-        buf = expect(Token::TypeOf);
-        if (!buf.has_value()) return std::unexpected(buf.error());
+        buf = look();
+        if (buf.first == Token::Paren) {
+            if (buf.second != "(") {
+                el.add_error({ {}, "Unexpected ')'" });
+                continue;
+            }
+            auto ve = expect_fargs(buf);
+            auto args = std::move(ve);
 
-        buf = expect_type(buf);
-        if (!buf.has_value()) return std::unexpected(buf.error());
+            buf = eat(Token::TypeOf);
 
-        Function c_func{ std::move(name), std::move(buf->second), std::move(args) };
+            buf = expect_type();
 
-        // parse function body
+            Function c_func{ std::move(name), std::move(buf.second), std::move(args) };
+            c_func.dump_info(std::cerr);
+            // parse function body
 
-        buf = expect(Token::Bracket);
-        if (!buf.has_value()) return std::unexpected(buf.error());
-        if (buf->second != "{") return std::unexpected(std::exception{ "Expected '{'" });
+            buf = eat(Token::Bracket);
+            if (buf.second != "{")
+            {
+                el.add_error({ {}, "Expected '{'" });
+                continue;
+            }
 
-        // empty function
-        if (auto l = lookUp.look(); l.has_value() && l->first == Token::Bracket && l->second == "}") {
-            ;
-        }
-        else {
-            std::cout << stringify_tok(l->first) << ": " << l->second << '\n';
-            auto v = l.value();
-            switch(v.first) {
-            case Token::Identifier:
-                if(v.second == "ret")
-                {
-                    EReturn ret;
+            // empty function
+            if (auto l = look(); l.first == Token::Bracket && l.second == "}") {
+                ;
+            }
+            else {
+                std::cout << stringify_tok(l.first) << ": " << l.second << '\n';
+                switch (l.first) {
+                case Token::Identifier:
+                    if (l.second == "ret")
+                    {
+                        EReturn ret;
+                    }
+                    break;
+                default:
+                    el.add_error({ {}, "Unexpected '" + l.second + '\'' });
+                    continue;
                 }
-                break;
-            default:
-                return std::unexpected(std::exception{ ("Unexpected '" + v.second + '\'').c_str() });
             }
         }
-    }
-    if(buf->first == Token::Separator) {
-        std::string ns = std::move(name);
+        if (buf.first == Token::Separator) {
+            std::string ns = std::move(name);
 
-        buf = expect();
-        if (!buf.has_value()) return std::unexpected(buf.error());
-    PARSE_NS:
-        if(buf->first == Token::Identifier) {
-            ns += ';' + std::move(buf->second);
-            buf = expect(Token::Separator);
-            if (!buf.has_value()) return std::unexpected(buf.error());
-            goto PARSE_NS;
+            buf = eat();
+        PARSE_NS:
+            if (buf.first == Token::Identifier) {
+                ns += ';' + std::move(buf.second);
+                buf = eat(Token::Separator);
+                goto PARSE_NS;
+            }
+            if (buf.first == Token::Bracket) {
+                if (buf.second != "{") {
+                    el.add_error({ {}, "Expected '{'" });
+                    continue;
+                }
+            }
+
+            // parse namespaces
+            std::cout << "NAMESPACE: " << ns << '\n';
         }
-        if (buf->first == Token::Bracket)
-            if (buf->second != "{")
-                return std::unexpected(std::exception{ "Expected '{'" });
 
-        // parse namespaces
-        std::cout << "NAMESPACE: " << ns << '\n';
+        if (buf.first == Token::From || buf.first == Token::Bracket) {
+            // parse class
+            std::cout << "CLASS: " << name << '\n';
+        }
+
+        break;
     }
 
-    if(buf->first == Token::From || buf->first == Token::Bracket) {
-        // parse class
-        std::cout << "CLASS: " << name << '\n';
-    }
-
-    return {};
+    return {{}, el};
 }
 
 } // ns code
 namespace init {
 
 // not meaning the function does compile
-int compile_zpp(const compile_env& env) noexcept {
+int compile_zpp(compile_env&& env) noexcept {
     auto toks = tok::tokenize_file(env.source_path_);
 
     if(toks.has_value()) {
         //std::cout << toks.value().begin()->second << '\n';
-        auto codes = code::make_codeblocks(std::move(toks.value()));
-        if (!codes.has_value()) std::cout << codes.error().what() << '\n';
+        auto codes = code::make_codeblocks(std::move(env), std::move(toks.value()));
         return 0;
     }
-    else {
-        std::cerr << toks.error().what() << '\n';
-        return -1;
-    }
-
-    return 0;
+    std::cerr << toks.error().what() << '\n';
+    return -1;
 }
 
-int run_build_conf(const init::compile_env& env) noexcept {
+int run_build_conf(init::compile_env&& env) noexcept {
     // TODO: someday.
 
     return 0;
 }
 } // ns init
 
-int parse_zpp(const init::compile_env& env) noexcept {
+int parse_zpp(init::compile_env&& env) noexcept {
     using namespace std::literals;
     using namespace zpp::init;
 
     const auto& pth = env.source_path_;
 
     if (std::ranges::starts_with(std::views::reverse(pth.string()), std::views::reverse("build.zpp"sv)))
-        return run_build_conf(env);
+        return run_build_conf(std::move(env));
 
-    return compile_zpp(env);
+    return compile_zpp(std::move(env));
 }
 } // ns zpp
 
@@ -674,7 +712,7 @@ int main(int c, char** v) {
 
     if (result.has_value()) {
         std::cout << result.value() << '\n';
-        return zpp::parse_zpp(*result);
+        return zpp::parse_zpp(std::move(*result));
     }
     std::cerr << "Failed to parse arguments: " << result.error().what() << '\n';
     return -1;
