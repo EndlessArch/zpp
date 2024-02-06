@@ -2,7 +2,9 @@
 
 func(_:i8, _:i16, _:i32, _:i64, _:i128): i32
 {
-  ret 0
+  a: i8 = 10
+  a = 5
+  ret a
 }
 
 # lets implement range-v3 things,,,

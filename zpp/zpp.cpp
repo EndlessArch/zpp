@@ -302,7 +302,7 @@ public:
     const std::string name_;
     const std::string ret_ty_;
     const farg_t farg_;
-    Function(std::string&& name, std::string&& ret_ty, farg_t&& args)
+    Function(std::string&& name, std::string&& ret_ty, farg_t&& args) noexcept
         : AST{}, name_(std::move(name)), ret_ty_(std::move(ret_ty)), farg_(std::move(args))
     {}
     ~Function() noexcept override = default;
@@ -324,7 +324,7 @@ public:
 
 class Namespace : public AST {
 public:
-    ~Namespace() override {}
+    ~Namespace() noexcept override {}
 
 
     std::ostream& dump_info(std::ostream& os) const noexcept override {
@@ -333,12 +333,34 @@ public:
 
     CodeBlock gen_code() const noexcept override {
         return CodeBlock{};
+    }
+
+    void add_func(Function&& f) const noexcept {
+        
     }
 };
 
 class Expression : public AST {
 public:
-    virtual ~Expression() = default;
+    virtual ~Expression() noexcept = default;
+
+    std::ostream& dump_info(std::ostream& os) const noexcept override = 0;
+
+    CodeBlock gen_code() const noexcept override = 0;
+};
+
+class EAssignVal;
+
+class EDeclareVar : public Expression {
+    const std::string name_;
+    const std::string type_;
+    std::unique_ptr<Expression> val_;
+public:
+    EDeclareVar(EDeclareVar&& dv) noexcept
+        : name_(dv.name_), type_(dv.type_), val_(std::move(dv.val_)) {}
+    EDeclareVar(std::string&& name, std::string&& type, std::unique_ptr<Expression> val = nullptr) noexcept
+        : name_(std::move(name)), type_(std::move(type)), val_(std::move(val)) {}
+    ~EDeclareVar() noexcept override = default;
 
     std::ostream& dump_info(std::ostream& os) const noexcept override {
         return os;
@@ -347,12 +369,21 @@ public:
     CodeBlock gen_code() const noexcept override {
         return CodeBlock{};
     }
+
+    friend EAssignVal;
+};
+
+class EAssignVal : public Expression {
+    EDeclareVar dv_;
+public:
+    EAssignVal(EDeclareVar&& dv) noexcept : dv_(std::move(dv)) {}
+    ~EAssignVal() noexcept override = default;
+    ;
 };
 
 class EReturn : public Expression {
 public:
-    ;
-    ~EReturn() override = default;
+    ~EReturn() noexcept override = default;
 
     std::ostream& dump_info(std::ostream& os) const noexcept override {
         return os;
@@ -376,6 +407,7 @@ class LookUp {
 
     typename std::vector<E>::iterator i_;
 public:
+    using value_type = E;
 
     LookUp(std::vector<E>&& v) : r_{ std::move(v)}, i_{r_.begin()} {}
 
@@ -390,6 +422,10 @@ public:
 
     E drop() noexcept {
         return *i_++;
+    }
+
+    void cancel() noexcept {
+        return *--i_;
     }
 };
 
@@ -444,18 +480,18 @@ auto make_codeblocks(init::compile_env&& env, auto&& tokens) noexcept
     ErrorLog el{ env.source_path_, std::cerr };
 
     // reference value type not allowed, so alternatively using pointer type
-    auto _expect = [&lookUp](ErrorLog& el, Token e = Token::Unknown) noexcept
+    auto _expect = [&lookUp](ErrorLog& _el, Token e = Token::Unknown) noexcept
         -> std::optional<LookUp<ve_t>*/*no-ref*/> {
         ;
         if (e == Token::Unknown) {
             if (lookUp.empty()) {
-                el.add_error({ {}, "No more token" });
+                _el.add_error({ {}, "No more token" });
                 return {};
             }
             return &lookUp;
         }
         if (auto l = lookUp.look(); l && l->first != e) {
-            el.add_error({ {}, "Expected " + stringify_tok(e) + ", but " + stringify_tok(l->first) });
+            _el.add_error({ {}, "Expected " + stringify_tok(e) + ", but " + stringify_tok(l->first) });
             return {};
         }
         return &lookUp;
@@ -573,7 +609,8 @@ PARSE_FARG:
 
             // empty function
             if (auto l = look(); l.first == Token::Bracket && l.second == "}") {
-                ;
+                glob_ns.add_func(std::move(c_func));
+                continue;
             }
             else {
                 std::cout << stringify_tok(l.first) << ": " << l.second << '\n';
